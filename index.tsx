@@ -173,7 +173,7 @@ function App() {
   };
 
   const getEffectiveApiKey = () => {
-    if (apiSource === 't8') return t8ApiKey;
+    if (apiSource === 't8') return t8ApiKey || process.env.T8_API_KEY;
     return customApiKey || process.env.API_KEY;
   };
 
