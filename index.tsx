@@ -965,12 +965,6 @@ function App() {
             >
               <Settings className="w-5 h-5" />
             </button>
-            <button 
-              onClick={handleSelectKey}
-              className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-medium text-gray-400 hover:text-white transition-colors border border-white/5"
-            >
-              切换项目
-            </button>
           </div>
         </header>
 
