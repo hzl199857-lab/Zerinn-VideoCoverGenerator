@@ -84,6 +84,7 @@ function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // --- API Key Selection Logic ---
   useEffect(() => {
@@ -329,11 +330,25 @@ function App() {
     }
   };
 
-  const generateSingleImage = async (targetRatio: string, currentPrompt: string, aiInstance: any): Promise<string> => {
+  const handleCancel = () => {
+      if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+          abortControllerRef.current = null;
+      }
+      setIsGenerating(false);
+      setProgressStep('');
+      setError('已取消生成任务');
+  };
+
+  const generateSingleImage = async (targetRatio: string, currentPrompt: string, aiInstance: any, signal?: AbortSignal): Promise<string> => {
       let retryCount = 0;
       const maxRetries = 3;
 
       while (retryCount <= maxRetries) {
+          if (signal?.aborted) {
+              throw new Error('用户取消了生成任务');
+          }
+
           try {
               if (apiSource === 't8') {
                   // T8 / OpenAI Compatible Image Generation
@@ -354,6 +369,7 @@ function App() {
                   // But T8 might support custom sizes.
                   
                   // If T8 uses the standard /v1/images/generations endpoint:
+                  /* 
                   const response = await openai.images.generate({
                       model: "nano-banana-2-2k", 
                       prompt: currentPrompt,
@@ -363,6 +379,7 @@ function App() {
                       n: 1,
                       // Custom properties for T8 if they support extra body params via some hack or if the SDK allows
                   });
+                  */
 
                   // NOTE: Standard OpenAI SDK doesn't easily allow custom body params like 'aspect_ratio' at top level.
                   // If T8 requires specific 'aspect_ratio' param outside prompt, we might need to fetch directly.
@@ -420,7 +437,7 @@ function App() {
                            // If T8 insists on returning URL and that URL is blocked, we are stuck without a backend proxy.
                            // BUT, let's try to see if we can force b64_json or use a public proxy.
                            // For now, let's try to fetch.
-                           const response = await fetch(url);
+                           const response = await fetch(url, { signal });
                            const blob = await response.blob();
                            return new Promise((resolve, reject) => {
                                const reader = new FileReader();
@@ -434,7 +451,7 @@ function App() {
                            return url;
                        }
                   };
-
+                  
                   // Helper to process T8 response data (extracted from async or sync)
                   const processT8Data = async (responseData: any) => {
                        // Log full data for debugging
@@ -502,6 +519,7 @@ function App() {
                           "Content-Type": "application/json",
                           "Authorization": `Bearer ${getEffectiveApiKey()}`
                       },
+                      signal,
                       body: JSON.stringify({
                           model: "nano-banana-2-2k",
                           prompt: currentPrompt + ` --ar ${targetRatio}`,
@@ -540,17 +558,26 @@ function App() {
                   setProgressStep(`任务已提交 (ID: ${taskId.slice(0, 8)}...)，正在排队生成...`);
 
                   // 2. Poll for Results
-                  const maxAttempts = 60; // 2 minutes timeout (2s interval)
+                  const maxAttempts = 300; // 10 minutes timeout (2s interval) to allow for slow generation
                   let pollAttempt = 0;
 
                   while (pollAttempt < maxAttempts) {
+                      if (signal?.aborted) throw new Error('用户取消了生成任务');
+
                       pollAttempt++;
-                      await new Promise(r => setTimeout(r, 2000)); // Wait 2s
+                      await new Promise((resolve, reject) => {
+                          const timeoutId = setTimeout(resolve, 2000);
+                          signal?.addEventListener('abort', () => {
+                              clearTimeout(timeoutId);
+                              reject(new Error('用户取消了生成任务'));
+                          });
+                      });
 
                       const pollResponse = await fetch(`https://ai.t8star.cn/v1/images/tasks/${taskId}`, {
                           headers: {
                               "Authorization": `Bearer ${getEffectiveApiKey()}`
-                          }
+                          },
+                          signal
                       });
 
                       if (!pollResponse.ok) {
@@ -581,6 +608,8 @@ function App() {
 
               } else {
                 // Google GenAI Logic
+                if (signal?.aborted) throw new Error('用户取消了生成任务');
+                
                 const response = await (aiInstance as GoogleGenAI).models.generateContent({
                     model: IMAGE_MODEL_NAME,
                     contents: [
@@ -599,6 +628,8 @@ function App() {
                         }
                     }
                 });
+                
+                if (signal?.aborted) throw new Error('用户取消了生成任务');
 
                 if (response.candidates?.[0]?.content?.parts) {
                     for (const part of response.candidates[0].content.parts) {
@@ -611,6 +642,10 @@ function App() {
               }
 
           } catch (error: any) {
+              if (error.message === '用户取消了生成任务' || error.name === 'AbortError') {
+                  throw error; // Don't retry if aborted
+              }
+
               // Check for 503 Service Unavailable or 429 Too Many Requests
               const isOverloaded = error.message?.includes('503') || error.message?.includes('overloaded') || error.message?.includes('429');
               
@@ -619,7 +654,14 @@ function App() {
                   const delay = Math.pow(2, retryCount) * 1000 + Math.random() * 1000; // Exponential backoff with jitter
                   console.log(`Model overloaded. Retrying ${targetRatio} in ${Math.round(delay)}ms... (Attempt ${retryCount}/${maxRetries})`);
                   setProgressStep(`服务器繁忙，正在重试 ${targetRatio} (${retryCount}/${maxRetries})...`);
-                  await new Promise(resolve => setTimeout(resolve, delay));
+                  
+                  await new Promise((resolve, reject) => {
+                      const timeoutId = setTimeout(resolve, delay);
+                      signal?.addEventListener('abort', () => {
+                          clearTimeout(timeoutId);
+                          reject(new Error('用户取消了生成任务'));
+                      });
+                  });
                   continue;
               }
               
@@ -1144,19 +1186,18 @@ function App() {
 
             {/* Generate Button */}
             <button
-              onClick={handleGenerate}
-              disabled={isGenerating}
+              onClick={isGenerating ? handleCancel : handleGenerate}
               className={`
                 w-full py-4 rounded-xl font-bold text-lg flex items-center justify-center gap-2 transition-all shadow-lg
                 ${isGenerating 
-                  ? 'bg-gray-700 text-gray-400 cursor-not-allowed' 
+                  ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-600/25' 
                   : 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:-translate-y-0.5'}
               `}
             >
               {isGenerating ? (
                 <>
-                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  生成中...
+                  <X className="w-5 h-5" />
+                  取消生成
                 </>
               ) : (
                 <>
