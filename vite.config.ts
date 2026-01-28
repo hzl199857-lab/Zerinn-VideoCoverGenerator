@@ -13,7 +13,7 @@ export default defineConfig(({ mode }) => {
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
         'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-        'process.env.T8_API_KEY': JSON.stringify(env.T8_API_KEY)
+        'process.env.T8_API_KEY': JSON.stringify(env.T8_API_KEY || env.VITE_T8_API_KEY)
       },
       resolve: {
         alias: {

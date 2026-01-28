@@ -123,8 +123,18 @@ function App() {
       } 
       
       // 3. Check Env Var
+      if (process.env.T8_API_KEY) {
+        if (!storedSource || storedSource === 't8') {
+          setApiSource('t8');
+          setHasApiKey(true);
+          return;
+        }
+      }
+
       if (process.env.API_KEY) {
-          if (apiSource === 'google') setHasApiKey(true);
+          if (!storedSource || storedSource === 'google') {
+             setHasApiKey(true);
+          }
       }
     };
     checkKey();
