@@ -538,6 +538,15 @@ function App() {
                   if (!t8Response.ok) {
                       const errText = await t8Response.text();
                       console.error("T8 Async Submit Error:", errText);
+
+                      // Try to extract quota info
+                      const quotaMatch = errText.match(/剩余额度:\s*([0-9.]+)/);
+                      const costMatch = errText.match(/预扣费额度:\s*([0-9.]+)/);
+                      
+                      if (t8Response.status === 403 && quotaMatch && costMatch) {
+                          throw new Error(`账户余额不足。当前余额 ${quotaMatch[1]}，本次生成需 ${costMatch[1]}。请充值或更换模型。`);
+                      }
+                      
                       throw new Error(`T8 Submit Error: ${t8Response.status} - ${errText}`);
                   }
 
