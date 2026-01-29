@@ -86,6 +86,14 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // --- API Key Selection Logic ---
+  // Initialize default source if T8 Env var exists and no preference
+  useEffect(() => {
+    // @ts-ignore
+    if (!localStorage.getItem('api_source') && process.env.T8_API_KEY) {
+      setApiSource('t8');
+    }
+  }, []);
+
   useEffect(() => {
     const checkKey = async () => {
       // Check stored preference
@@ -124,6 +132,12 @@ function App() {
       // 3. Check Env Var
       if (process.env.API_KEY) {
           if (apiSource === 'google') setHasApiKey(true);
+      }
+
+      // 4. Check T8 Env Var
+      // @ts-ignore
+      if (process.env.T8_API_KEY) {
+          if (apiSource === 't8') setHasApiKey(true);
       }
     };
     checkKey();
@@ -172,7 +186,8 @@ function App() {
   };
 
   const getEffectiveApiKey = () => {
-    if (apiSource === 't8') return t8ApiKey;
+    // @ts-ignore
+    if (apiSource === 't8') return t8ApiKey || process.env.T8_API_KEY;
     return customApiKey || process.env.API_KEY;
   };
 
