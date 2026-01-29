@@ -84,7 +84,6 @@ function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
 
   // --- API Key Selection Logic ---
   useEffect(() => {
@@ -123,18 +122,8 @@ function App() {
       } 
       
       // 3. Check Env Var
-      if (process.env.T8_API_KEY) {
-        if (!storedSource || storedSource === 't8') {
-          setApiSource('t8');
-          setHasApiKey(true);
-          return;
-        }
-      }
-
       if (process.env.API_KEY) {
-          if (!storedSource || storedSource === 'google') {
-             setHasApiKey(true);
-          }
+          if (apiSource === 'google') setHasApiKey(true);
       }
     };
     checkKey();
@@ -183,7 +172,7 @@ function App() {
   };
 
   const getEffectiveApiKey = () => {
-    if (apiSource === 't8') return t8ApiKey || process.env.T8_API_KEY;
+    if (apiSource === 't8') return t8ApiKey;
     return customApiKey || process.env.API_KEY;
   };
 
@@ -340,25 +329,11 @@ function App() {
     }
   };
 
-  const handleCancel = () => {
-      if (abortControllerRef.current) {
-          abortControllerRef.current.abort();
-          abortControllerRef.current = null;
-      }
-      setIsGenerating(false);
-      setProgressStep('');
-      setError('已取消生成任务');
-  };
-
-  const generateSingleImage = async (targetRatio: string, currentPrompt: string, aiInstance: any, signal?: AbortSignal): Promise<string> => {
+  const generateSingleImage = async (targetRatio: string, currentPrompt: string, aiInstance: any): Promise<string> => {
       let retryCount = 0;
       const maxRetries = 3;
 
       while (retryCount <= maxRetries) {
-          if (signal?.aborted) {
-              throw new Error('用户取消了生成任务');
-          }
-
           try {
               if (apiSource === 't8') {
                   // T8 / OpenAI Compatible Image Generation
@@ -379,7 +354,6 @@ function App() {
                   // But T8 might support custom sizes.
                   
                   // If T8 uses the standard /v1/images/generations endpoint:
-                  /* 
                   const response = await openai.images.generate({
                       model: "nano-banana-2-2k", 
                       prompt: currentPrompt,
@@ -389,7 +363,6 @@ function App() {
                       n: 1,
                       // Custom properties for T8 if they support extra body params via some hack or if the SDK allows
                   });
-                  */
 
                   // NOTE: Standard OpenAI SDK doesn't easily allow custom body params like 'aspect_ratio' at top level.
                   // If T8 requires specific 'aspect_ratio' param outside prompt, we might need to fetch directly.
@@ -447,7 +420,7 @@ function App() {
                            // If T8 insists on returning URL and that URL is blocked, we are stuck without a backend proxy.
                            // BUT, let's try to see if we can force b64_json or use a public proxy.
                            // For now, let's try to fetch.
-                           const response = await fetch(url, { signal });
+                           const response = await fetch(url);
                            const blob = await response.blob();
                            return new Promise((resolve, reject) => {
                                const reader = new FileReader();
@@ -461,7 +434,7 @@ function App() {
                            return url;
                        }
                   };
-                  
+
                   // Helper to process T8 response data (extracted from async or sync)
                   const processT8Data = async (responseData: any) => {
                        // Log full data for debugging
@@ -529,7 +502,6 @@ function App() {
                           "Content-Type": "application/json",
                           "Authorization": `Bearer ${getEffectiveApiKey()}`
                       },
-                      signal,
                       body: JSON.stringify({
                           model: "nano-banana-2-2k",
                           prompt: currentPrompt + ` --ar ${targetRatio}`,
@@ -568,26 +540,17 @@ function App() {
                   setProgressStep(`任务已提交 (ID: ${taskId.slice(0, 8)}...)，正在排队生成...`);
 
                   // 2. Poll for Results
-                  const maxAttempts = 300; // 10 minutes timeout (2s interval) to allow for slow generation
+                  const maxAttempts = 60; // 2 minutes timeout (2s interval)
                   let pollAttempt = 0;
 
                   while (pollAttempt < maxAttempts) {
-                      if (signal?.aborted) throw new Error('用户取消了生成任务');
-
                       pollAttempt++;
-                      await new Promise((resolve, reject) => {
-                          const timeoutId = setTimeout(resolve, 2000);
-                          signal?.addEventListener('abort', () => {
-                              clearTimeout(timeoutId);
-                              reject(new Error('用户取消了生成任务'));
-                          });
-                      });
+                      await new Promise(r => setTimeout(r, 2000)); // Wait 2s
 
                       const pollResponse = await fetch(`https://ai.t8star.cn/v1/images/tasks/${taskId}`, {
                           headers: {
                               "Authorization": `Bearer ${getEffectiveApiKey()}`
-                          },
-                          signal
+                          }
                       });
 
                       if (!pollResponse.ok) {
@@ -618,8 +581,6 @@ function App() {
 
               } else {
                 // Google GenAI Logic
-                if (signal?.aborted) throw new Error('用户取消了生成任务');
-                
                 const response = await (aiInstance as GoogleGenAI).models.generateContent({
                     model: IMAGE_MODEL_NAME,
                     contents: [
@@ -638,8 +599,6 @@ function App() {
                         }
                     }
                 });
-                
-                if (signal?.aborted) throw new Error('用户取消了生成任务');
 
                 if (response.candidates?.[0]?.content?.parts) {
                     for (const part of response.candidates[0].content.parts) {
@@ -652,10 +611,6 @@ function App() {
               }
 
           } catch (error: any) {
-              if (error.message === '用户取消了生成任务' || error.name === 'AbortError') {
-                  throw error; // Don't retry if aborted
-              }
-
               // Check for 503 Service Unavailable or 429 Too Many Requests
               const isOverloaded = error.message?.includes('503') || error.message?.includes('overloaded') || error.message?.includes('429');
               
@@ -664,14 +619,7 @@ function App() {
                   const delay = Math.pow(2, retryCount) * 1000 + Math.random() * 1000; // Exponential backoff with jitter
                   console.log(`Model overloaded. Retrying ${targetRatio} in ${Math.round(delay)}ms... (Attempt ${retryCount}/${maxRetries})`);
                   setProgressStep(`服务器繁忙，正在重试 ${targetRatio} (${retryCount}/${maxRetries})...`);
-                  
-                  await new Promise((resolve, reject) => {
-                      const timeoutId = setTimeout(resolve, delay);
-                      signal?.addEventListener('abort', () => {
-                          clearTimeout(timeoutId);
-                          reject(new Error('用户取消了生成任务'));
-                      });
-                  });
+                  await new Promise(resolve => setTimeout(resolve, delay));
                   continue;
               }
               
@@ -842,7 +790,7 @@ function App() {
     if (!showKeyModal) return null;
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in duration-200">
-        <div className="bg-[#1a1d24] border border-white/10 rounded-2xl p-6 w-full max-w-md shadow-2xl relative animate-in zoom-in-95 duration-200">
+        <div className="bg-[#121212] border border-white/10 rounded-2xl p-6 w-full max-w-md shadow-2xl relative animate-in zoom-in-95 duration-200">
           <button 
             onClick={() => setShowKeyModal(false)}
             className="absolute right-4 top-4 text-gray-400 hover:text-white transition-colors"
@@ -851,7 +799,7 @@ function App() {
           </button>
           
           <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
-            <Key className="w-5 h-5 text-indigo-400" />
+            <Key className="w-5 h-5 text-violet-400" />
             设置 API Key
           </h3>
           <p className="text-sm text-gray-400 mb-6 leading-relaxed">
@@ -863,13 +811,13 @@ function App() {
             <div className="flex bg-black/30 p-1 rounded-xl border border-white/10">
                 <button
                   onClick={() => handleSourceChange('google')}
-                  className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${apiSource === 'google' ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
+                  className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${apiSource === 'google' ? 'bg-violet-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
                 >
                     Google 官方
                 </button>
                 <button
                   onClick={() => handleSourceChange('t8')}
-                  className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${apiSource === 't8' ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
+                  className={`flex-1 py-2 rounded-lg text-xs font-bold transition-all ${apiSource === 't8' ? 'bg-violet-600 text-white shadow-lg' : 'text-gray-400 hover:text-white'}`}
                 >
                     T8 聚合 API
                 </button>
@@ -883,7 +831,7 @@ function App() {
                     value={tempKey}
                     onChange={(e) => setTempKey(e.target.value)}
                     placeholder="AIzaSy..."
-                    className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono text-sm transition-all"
+                    className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-white focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 font-mono text-sm transition-all"
                 />
                 </div>
             ) : (
@@ -894,7 +842,7 @@ function App() {
                     value={tempT8Key}
                     onChange={(e) => setTempT8Key(e.target.value)}
                     placeholder="sk-..."
-                    className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-white focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono text-sm transition-all"
+                    className="w-full bg-black/30 border border-white/10 rounded-xl px-4 py-3 text-white focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 font-mono text-sm transition-all"
                 />
                 <p className="text-xs text-gray-500 mt-2">
                     需要配合 T8 聚合 API 使用，生图将使用 <code>nano-banana-2</code> 模型。
@@ -912,7 +860,7 @@ function App() {
               <button 
                 onClick={handleManualKeySubmit}
                 disabled={apiSource === 'google' ? !tempKey.trim() : !tempT8Key.trim()}
-                className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold shadow-lg shadow-indigo-600/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                className="flex-1 py-3 bg-violet-600 hover:bg-violet-500 text-white rounded-xl font-bold shadow-lg shadow-violet-600/20 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
               >
                 确认保存
               </button>
@@ -925,7 +873,7 @@ function App() {
                 href="https://aistudio.google.com/app/apikey" 
                 target="_blank" 
                 rel="noopener noreferrer"
-                className="text-xs text-indigo-400 hover:text-indigo-300 inline-flex items-center gap-1 transition-colors"
+                className="text-xs text-violet-400 hover:text-violet-300 inline-flex items-center gap-1 transition-colors"
                 >
                 获取 Gemini API Key <ExternalLink size={10} />
                 </a>
@@ -934,7 +882,7 @@ function App() {
                 href="https://ai.t8star.cn" 
                 target="_blank" 
                 rel="noopener noreferrer"
-                className="text-xs text-indigo-400 hover:text-indigo-300 inline-flex items-center gap-1 transition-colors"
+                className="text-xs text-violet-400 hover:text-violet-300 inline-flex items-center gap-1 transition-colors"
                 >
                 前往 T8 获取 Key <ExternalLink size={10} />
                 </a>
@@ -948,10 +896,10 @@ function App() {
   // --- Render Landing Page (No Key) ---
   if (!hasApiKey) {
     return (
-      <div className="min-h-screen bg-[#0f1115] text-white font-sans flex items-center justify-center p-4 relative">
+      <div className="min-h-screen bg-[#050505] text-white font-sans flex items-center justify-center p-4 relative">
         {renderKeyModal()}
-        <div className="max-w-md w-full bg-[#1a1d24] border border-white/10 rounded-3xl p-8 text-center shadow-2xl">
-          <div className="w-16 h-16 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl mx-auto mb-6 flex items-center justify-center shadow-lg shadow-indigo-500/30">
+        <div className="max-w-md w-full bg-[#121212] border border-white/10 rounded-3xl p-8 text-center shadow-2xl">
+          <div className="w-16 h-16 bg-gradient-to-br from-violet-500 to-purple-600 rounded-2xl mx-auto mb-6 flex items-center justify-center shadow-lg shadow-violet-500/30">
             <Key className="w-8 h-8 text-white" />
           </div>
           <h1 className="text-2xl font-bold mb-3">连接 Google Cloud</h1>
@@ -980,7 +928,7 @@ function App() {
             href="https://ai.google.dev/gemini-api/docs/billing" 
             target="_blank" 
             rel="noopener noreferrer"
-            className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center justify-center gap-1 transition-colors"
+            className="text-xs text-violet-400 hover:text-violet-300 flex items-center justify-center gap-1 transition-colors"
           >
             了解关于 Gemini API 计费 <ExternalLink className="w-3 h-3" />
           </a>
@@ -991,14 +939,14 @@ function App() {
 
   // --- Render Main App ---
   return (
-    <div className="min-h-screen bg-[#0f1115] text-white font-sans selection:bg-indigo-500/30">
+    <div className="min-h-screen bg-[#050505] text-white font-sans selection:bg-violet-500/30">
       {renderKeyModal()}
       <div className="max-w-[1600px] mx-auto p-4 lg:p-8">
         
         {/* Header */}
         <header className="mb-8 flex items-center justify-between border-b border-white/10 pb-6">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-500/20">
+            <div className="w-10 h-10 bg-gradient-to-br from-violet-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg shadow-violet-500/20">
               <Sparkles className="w-6 h-6 text-white" />
             </div>
             <div>
@@ -1026,9 +974,9 @@ function App() {
           <div className="lg:col-span-4 space-y-6">
             
             {/* 1. Upload Section */}
-            <div className="bg-[#1a1d24] rounded-2xl p-6 border border-white/5 shadow-xl">
+            <div className="bg-[#121212] rounded-2xl p-6 border border-white/5 shadow-xl">
               <h2 className="text-sm font-bold text-gray-400 mb-4 flex items-center gap-2">
-                <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-xs">1</span>
+                <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-400 flex items-center justify-center text-xs">1</span>
                 上传人物参考图
               </h2>
               <div 
@@ -1038,8 +986,8 @@ function App() {
                 className={`
                   relative group cursor-pointer h-48 rounded-xl border-2 border-dashed transition-all duration-300 flex flex-col items-center justify-center overflow-hidden
                   ${uploadedImage 
-                    ? 'border-indigo-500/50 bg-indigo-900/10' 
-                    : 'border-white/10 hover:border-indigo-500/50 hover:bg-white/5'}
+                    ? 'border-violet-500/50 bg-violet-900/10' 
+                    : 'border-white/10 hover:border-violet-500/50 hover:bg-white/5'}
                 `}
               >
                 <input 
@@ -1076,12 +1024,12 @@ function App() {
             </div>
 
             {/* 2. Title & AI Analysis */}
-            <div className="bg-[#1a1d24] rounded-2xl p-6 border border-white/5 shadow-xl space-y-6">
+            <div className="bg-[#121212] rounded-2xl p-6 border border-white/5 shadow-xl space-y-6">
               
               {/* Title Input */}
               <div>
                 <h2 className="text-sm font-bold text-gray-400 mb-3 flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-xs">2</span>
+                  <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-400 flex items-center justify-center text-xs">2</span>
                   封面标题 (Text)
                 </h2>
                 <div className="relative">
@@ -1091,7 +1039,7 @@ function App() {
                     onChange={(e) => setTitle(e.target.value)}
                     placeholder="例如：&#10;5分钟学会React！&#10;月薪过万攻略"
                     rows={3}
-                    className="w-full bg-black/20 border border-white/10 rounded-xl py-3 pl-10 pr-24 text-white placeholder-gray-600 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all text-lg font-medium resize-none min-h-[80px]"
+                    className="w-full bg-black/20 border border-white/10 rounded-xl py-3 pl-10 pr-24 text-white placeholder-gray-600 focus:outline-none focus:border-violet-500 focus:ring-1 focus:ring-violet-500 transition-all text-lg font-medium resize-none min-h-[80px]"
                   />
                   <button 
                     onClick={handleAnalyzeTitle}
@@ -1099,8 +1047,8 @@ function App() {
                     className={`
                       absolute right-2 bottom-2 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all
                       ${isAnalyzing 
-                        ? 'bg-indigo-500/20 text-indigo-300' 
-                        : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-500/20'}
+                        ? 'bg-violet-500/20 text-violet-300' 
+                        : 'bg-violet-600 hover:bg-violet-500 text-white shadow-lg shadow-violet-500/20'}
                     `}
                   >
                     {isAnalyzing ? (
@@ -1115,10 +1063,10 @@ function App() {
               </div>
 
               {/* AI Style Suggestion Area (Always Visible) */}
-              <div className="bg-gradient-to-br from-indigo-900/20 to-purple-900/20 border border-indigo-500/30 rounded-xl p-4">
+              <div className="bg-gradient-to-br from-violet-900/20 to-purple-900/20 border border-violet-500/30 rounded-xl p-4">
                   <div className="flex items-center gap-2 mb-3">
-                    <Sparkles className="w-4 h-4 text-indigo-400" />
-                    <span className="text-xs font-bold text-indigo-200 uppercase tracking-wide">AI 风格推荐 (可重复点击刷新)</span>
+                    <Sparkles className="w-4 h-4 text-violet-400" />
+                    <span className="text-xs font-bold text-violet-200 uppercase tracking-wide">AI 风格推荐 (可重复点击刷新)</span>
                   </div>
                   
                   <div className="space-y-3">
@@ -1132,7 +1080,7 @@ function App() {
                         value={clothingStyle}
                         onChange={(e) => setClothingStyle(e.target.value)}
                         placeholder="等待 AI 分析..."
-                        className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                        className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:border-violet-500 focus:outline-none"
                       />
                     </div>
                     {/* Background Field */}
@@ -1145,7 +1093,7 @@ function App() {
                         value={backgroundScene}
                         onChange={(e) => setBackgroundScene(e.target.value)}
                         placeholder="等待 AI 分析..."
-                        className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:border-indigo-500 focus:outline-none"
+                        className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:border-violet-500 focus:outline-none"
                       />
                     </div>
                   </div>
@@ -1154,7 +1102,7 @@ function App() {
               {/* Ratio Selection */}
               <div>
                 <h2 className="text-sm font-bold text-gray-400 mb-3 flex items-center gap-2">
-                  <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-xs">3</span>
+                  <span className="w-5 h-5 rounded-full bg-violet-500/20 text-violet-400 flex items-center justify-center text-xs">3</span>
                   画布比例
                 </h2>
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
@@ -1165,7 +1113,7 @@ function App() {
                       className={`
                         flex flex-col items-center justify-center p-3 rounded-lg border transition-all
                         ${aspectRatio === opt.value 
-                          ? 'bg-indigo-600/20 border-indigo-500 text-white' 
+                          ? 'bg-violet-600/20 border-violet-500 text-white' 
                           : 'bg-black/20 border-transparent text-gray-500 hover:bg-white/5 hover:text-gray-300'}
                       `}
                     >
@@ -1178,7 +1126,7 @@ function App() {
             </div>
 
             {/* 4. Modification (Optional) */}
-            <div className="bg-[#1a1d24] rounded-2xl p-6 border border-white/5 shadow-xl">
+            <div className="bg-[#121212] rounded-2xl p-6 border border-white/5 shadow-xl">
               <h2 className="text-sm font-bold text-gray-400 mb-3 flex items-center gap-2">
                 <span className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xs">4</span>
                 额外补充 (可选)
@@ -1196,18 +1144,19 @@ function App() {
 
             {/* Generate Button */}
             <button
-              onClick={isGenerating ? handleCancel : handleGenerate}
+              onClick={handleGenerate}
+              disabled={isGenerating}
               className={`
                 w-full py-4 rounded-xl font-bold text-lg flex items-center justify-center gap-2 transition-all shadow-lg
                 ${isGenerating 
-                  ? 'bg-red-600 hover:bg-red-700 text-white shadow-red-600/25' 
-                  : 'bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white shadow-indigo-500/25 hover:shadow-indigo-500/40 hover:-translate-y-0.5'}
+                  ? 'bg-gray-700 text-gray-400 cursor-not-allowed' 
+                  : 'bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-500 hover:to-purple-500 text-white shadow-violet-500/25 hover:shadow-violet-500/40 hover:-translate-y-0.5'}
               `}
             >
               {isGenerating ? (
                 <>
-                  <X className="w-5 h-5" />
-                  取消生成
+                  <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  生成中...
                 </>
               ) : (
                 <>
@@ -1228,7 +1177,7 @@ function App() {
           {/* RIGHT COLUMN: Preview & History */}
           <div className="lg:col-span-8 flex gap-4 min-h-[600px]">
             {/* Main Preview Area */}
-            <div className="flex-1 bg-[#15171c] rounded-3xl border border-white/5 p-4 lg:p-8 flex flex-col relative overflow-hidden">
+            <div className="flex-1 bg-[#0a0a0a] rounded-3xl border border-white/5 p-4 lg:p-8 flex flex-col relative overflow-hidden">
               
               {/* Background Pattern */}
               <div className="absolute inset-0 opacity-20 pointer-events-none" 
@@ -1242,14 +1191,14 @@ function App() {
                 {isGenerating ? (
                   <div className="text-center space-y-6 animate-pulse">
                     <div className="w-24 h-24 mx-auto relative">
-                      <div className="absolute inset-0 bg-indigo-500/20 rounded-full animate-ping" />
-                      <div className="relative z-10 w-full h-full bg-gradient-to-tr from-indigo-500 to-purple-600 rounded-full flex items-center justify-center">
+                      <div className="absolute inset-0 bg-violet-500/20 rounded-full animate-ping" />
+                      <div className="relative z-10 w-full h-full bg-gradient-to-tr from-violet-500 to-purple-600 rounded-full flex items-center justify-center">
                         <Sparkles className="w-10 h-10 text-white animate-spin-slow" />
                       </div>
                     </div>
                     <div className="space-y-2">
                       <h3 className="text-2xl font-bold text-white">AI 正在创作</h3>
-                      <p className="text-indigo-300 font-mono text-sm">{progressStep}</p>
+                      <p className="text-violet-300 font-mono text-sm">{progressStep}</p>
                       {clothingStyle && (
                         <p className="text-gray-500 text-xs mt-2">应用风格：{clothingStyle} + {backgroundScene}</p>
                       )}
@@ -1275,7 +1224,7 @@ function App() {
                                  <a 
                                     href={img.url}
                                     download={`cover-${img.ratio}-${Date.now()}.png`}
-                                    className="p-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-white transition-colors"
+                                    className="p-2 bg-violet-600 hover:bg-violet-500 rounded-lg text-white transition-colors"
                                     title="下载"
                                  >
                                     <Download size={16} />
@@ -1318,7 +1267,7 @@ function App() {
                       </button>
                       <button 
                         onClick={downloadImage}
-                        className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-2 rounded-lg font-bold flex items-center gap-2 shadow-lg shadow-indigo-600/30"
+                        className="bg-violet-600 hover:bg-violet-500 text-white px-6 py-2 rounded-lg font-bold flex items-center gap-2 shadow-lg shadow-violet-600/30"
                       >
                         <Download size={18} /> 下载封面
                       </button>
@@ -1329,7 +1278,7 @@ function App() {
                     <ImageIcon className="w-24 h-24 mx-auto mb-4 text-gray-500" />
                     <h3 className="text-xl font-bold text-white mb-2">等待生成</h3>
                     <p className="text-gray-400">
-                      在左侧上传图片、填写标题并点击 <span className="inline-flex items-center gap-1 bg-indigo-500/20 px-1.5 py-0.5 rounded text-indigo-300 text-xs"><Wand2 size={10}/> AI分析</span>，让 AI 为您定制专属风格。
+                      在左侧上传图片、填写标题并点击 <span className="inline-flex items-center gap-1 bg-violet-500/20 px-1.5 py-0.5 rounded text-violet-300 text-xs"><Wand2 size={10}/> AI分析</span>，让 AI 为您定制专属风格。
                     </p>
                   </div>
                 )}
@@ -1347,7 +1296,7 @@ function App() {
 
             {/* History Sidebar */}
             {history.length > 0 && (
-               <div className="w-24 bg-[#1a1d24] border border-white/5 rounded-2xl flex flex-col shrink-0 overflow-hidden">
+               <div className="w-24 bg-[#121212] border border-white/5 rounded-2xl flex flex-col shrink-0 overflow-hidden">
                 <div className="p-3 border-b border-white/5 text-center bg-black/20">
                   <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center mx-auto mb-1">
                     <History className="w-4 h-4 text-gray-400" />
@@ -1361,7 +1310,7 @@ function App() {
                       onClick={() => handleRestoreHistory(item)}
                       className={`
                         relative group cursor-pointer rounded-lg overflow-hidden border-2 transition-all aspect-square
-                        ${generatedImage === item.imageUrl ? 'border-indigo-500 ring-2 ring-indigo-500/20' : 'border-transparent hover:border-white/30'}
+                        ${generatedImage === item.imageUrl ? 'border-violet-500 ring-2 ring-violet-500/20' : 'border-transparent hover:border-white/30'}
                       `}
                     >
                       <img 
